@@ -8,7 +8,7 @@ Download a release from [GitHub Releases](https://github.com/nascarjake/clip-my-
 
 - **Mac Apple Silicon:** `Clip-My-Screen-…-macOS-arm64.zip`
 - **Mac Intel:** `Clip-My-Screen-…-macOS-x86_64.zip`
-- **Windows x64:** `Clip My Screen-…-Windows-x64-portable.exe`
+- **Windows x64:** `Clip.My.Screen-…-Windows-x64-portable.exe`
 
 On Mac, unzip and keep **Launch Clip My Screen.command** beside **Clip My Screen.app**. Double-click the command to clear the downloaded app's quarantine attribute and open it. This release is unsigned and unnotarized; only run it if you trust this project's source and release. Grant Screen Recording permission to **Clip My Screen Capture** when macOS asks. On Windows, run the portable `.exe` and grant screen capture permission if prompted.
 
