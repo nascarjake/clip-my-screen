@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>dev.jakedoes.clipmyscreen.capture</string>
+  <key>CFBundleName</key><string>Clip My Screen Capture</string>
+  <key>CFBundleDisplayName</key><string>Clip My Screen Capture</string>
+  <key>CFBundleExecutable</key><string>clip-capture</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>LSBackgroundOnly</key><true/>
+  <key>NSScreenCaptureUsageDescription</key><string>Save recent screen moments when you press the clip hotkey.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Include your microphone in clips when enabled in settings.</string>
+</dict></plist>

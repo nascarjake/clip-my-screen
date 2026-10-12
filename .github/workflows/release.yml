@@ -1,0 +1,63 @@
+name: Desktop releases
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: bash scripts/package-mac.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clip-my-screen-${{ matrix.runner }}
+          path: dist/Clip-My-Screen-*-macOS-*.zip
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run package:win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clip-my-screen-windows
+          path: dist/*-Windows-*-portable.exe
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [mac, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: clip-my-screen-*
+          merge-multiple: true
+          path: release
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release create "${GITHUB_REF_NAME}" release/* --title "Clip My Screen ${GITHUB_REF_NAME}" --generate-notes

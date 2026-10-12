@@ -1,0 +1,8 @@
+build/
+dist/
+node_modules/
+bin/cloudflared
+.DS_Store
+.worklog/
+assets/icon.iconset/
+vendor/
