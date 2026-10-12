@@ -205,6 +205,10 @@ final class CaptureAgent: NSObject, SCRecordingOutputDelegate, SCStreamDelegate 
 }
 
 let arguments = CommandLine.arguments
+guard let directoryArgument = arguments.firstIndex(of: "--dir"), directoryArgument + 1 < arguments.count else {
+    fputs("Clip My Screen Capture is a background helper. Open Clip My Screen.app instead.\n", stderr)
+    exit(64)
+}
 func argument(_ name: String, fallback: String) -> String {
     guard let index = arguments.firstIndex(of: name), index + 1 < arguments.count else { return fallback }
     return arguments[index + 1]
