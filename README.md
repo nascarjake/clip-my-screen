@@ -12,7 +12,7 @@ Download a release from [GitHub Releases](https://github.com/nascarjake/clip-my-
 
 On Mac, unzip and keep **Launch Clip My Screen.command** beside **Clip My Screen.app**. Double-click the command to clear the downloaded app's quarantine attribute and open it. This release is unsigned and unnotarized; only run it if you trust this project's source and release. Grant Screen Recording permission to **Clip My Screen Capture** when macOS asks. On Windows, run the portable `.exe` and grant screen capture permission if prompted.
 
-Closing the desktop window leaves the recorder active in the background. The app requests launch at login. On Windows, use its tray icon to reopen or quit it. Capture files are stored in `~/Movies/Clip My Screen` on Mac or `Videos/Clip My Screen` on Windows. A full 15-minute replay becomes available after 15 minutes of uninterrupted capture. Selecting another display starts a fresh buffer.
+Closing the desktop window leaves the recorder active in the background. The app requests launch at login. Use the menu bar icon on Mac or the notification area icon on Windows to reopen the window, save the last 1, 5, or 15 minutes, or quit the recorder completely. On Windows, double-clicking the icon also opens the window. Capture files are stored in `~/Movies/Clip My Screen` on Mac or `Videos/Clip My Screen` on Windows. A full 15-minute replay becomes available after 15 minutes of uninterrupted capture. Selecting another display starts a fresh buffer.
 
 | Action | Mac shortcut | Windows shortcut |
 | --- | --- | --- |

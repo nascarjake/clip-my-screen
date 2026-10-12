@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, globalShortcut, Menu, screen, Tray } = require('electron');
+const { app, BrowserWindow, dialog, globalShortcut, Menu, nativeImage, screen, Tray } = require('electron');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -40,7 +40,7 @@ function startService() {
     ? path.join(process.resourcesPath, 'ffmpeg', process.platform === 'win32' ? 'ffmpeg.exe' : 'bin/ffmpeg')
     : process.env.CMS_FFMPEG || path.join(project, 'vendor', process.platform === 'win32' ? 'ffmpeg.exe' : 'bin/ffmpeg');
   const nativeHelper = app.isPackaged
-    ? path.join(resources, 'Clip My Screen Capture.app', 'Contents', 'MacOS', 'clip-capture')
+    ? path.join(process.resourcesPath, 'Clip My Screen Capture.app', 'Contents', 'MacOS', 'clip-capture')
     : path.join(project, 'build', 'Clip My Screen Capture.app', 'Contents', 'MacOS', 'clip-capture');
   const env = {
     ...process.env,
@@ -66,10 +66,30 @@ function startService() {
 
 async function post(route, payload = {}) {
   try {
-    await fetch(`http://127.0.0.1:3917/api/${route}`, {
+    const response = await fetch(`http://127.0.0.1:3917/api/${route}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
     });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      throw new Error(result.error || `Capture request failed (${response.status})`);
+    }
   } catch (error) { dialog.showErrorBox('Capture unavailable', error.message); }
+}
+
+function createTray() {
+  const icon = nativeImage.createFromPath(path.join(app.getAppPath(), 'assets', 'tray.png'));
+  tray = new Tray(process.platform === 'darwin' ? icon.resize({ width: 18, height: 18 }) : icon);
+  tray.setToolTip('Clip My Screen is recording in the background');
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: 'Open Clip My Screen', click: showWindow },
+    { type: 'separator' },
+    { label: 'Clip last 1 minute', click: () => post('grab', { seconds: 60 }) },
+    { label: 'Clip last 5 minutes', click: () => post('grab', { seconds: 300 }) },
+    { label: 'Clip last 15 minutes', click: () => post('grab', { seconds: 900 }) },
+    { type: 'separator' },
+    { label: 'Quit Clip My Screen', click: () => app.quit() }
+  ]));
+  if (process.platform === 'win32') tray.on('double-click', showWindow);
 }
 
 function registerWindowsShortcuts() {
@@ -124,17 +144,9 @@ else {
     });
     if (!(await serviceReady())) startService();
     for (let attempt = 0; attempt < 60 && !(await serviceReady()); attempt++) await new Promise(resolve => setTimeout(resolve, 500));
-    if (process.platform === 'win32') {
-      registerWindowsShortcuts();
-      tray = new Tray(path.join(app.getAppPath(), 'assets', 'tray.png'));
-      tray.setToolTip('Clip My Screen');
-      tray.setContextMenu(Menu.buildFromTemplate([
-        { label: 'Open Clip My Screen', click: showWindow },
-        { type: 'separator' },
-        { label: 'Quit', click: () => app.quit() }
-      ]));
-      tray.on('double-click', showWindow);
-    }
+    if (process.platform === 'win32') registerWindowsShortcuts();
+    createTray();
+    if (process.platform === 'darwin') app.dock.hide();
     createWindow();
     app.on('activate', showWindow);
   });
