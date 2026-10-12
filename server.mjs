@@ -55,6 +55,9 @@ let helper;
 let helperBuffer = '';
 let captureQueue = Promise.resolve();
 let restartRequested = false;
+let helperFailures = 0;
+let helperStartedAt = 0;
+let shuttingDown = false;
 let tunnelProcess;
 
 function executable(name) {
@@ -119,6 +122,7 @@ function sendHelper(value) {
 }
 function startHelper() {
   if (process.env.CMS_DISABLE_CAPTURE === '1') return;
+  helperStartedAt = Date.now();
   const nativeExecutable = process.env.CMS_NATIVE_HELPER || path.join(root, 'build', 'Clip My Screen Capture.app', 'Contents', 'MacOS', 'clip-capture');
   const windows = process.platform === 'win32';
   if (!windows && !fs.existsSync(nativeExecutable)) {
@@ -152,12 +156,17 @@ function startHelper() {
     for (const file of await fsp.readdir(bufferDir).catch(() => [])) {
       if (file.startsWith('segment-')) await fsp.rm(path.join(bufferDir, file), { force: true }).catch(() => {});
     }
+    if (shuttingDown) return;
     if (restartRequested) {
       restartRequested = false;
+      helperFailures = 0;
       setTimeout(startHelper, 300).unref();
     } else if (code !== 0 && process.env.CMS_DISABLE_CAPTURE !== '1') {
-      runtime.error = `Capture helper exited (${code}). Retrying…`;
-      setTimeout(startHelper, 3000).unref();
+      if (Date.now() - helperStartedAt > 60_000) helperFailures = 0;
+      helperFailures += 1;
+      const delay = Math.min(180_000, 3000 * 2 ** Math.min(helperFailures - 1, 6));
+      runtime.error = `Capture helper exited (${code}). Retrying in ${Math.round(delay / 1000)} seconds…`;
+      setTimeout(startHelper, delay).unref();
     }
   });
 }
@@ -346,9 +355,6 @@ async function pruneBuffer() {
   }
 }
 setInterval(pruneBuffer, 20_000).unref();
-for (const file of await fsp.readdir(bufferDir)) if (file.startsWith('segment-') || file.startsWith('concat-')) await fsp.rm(path.join(bufferDir, file), { force: true }).catch(() => {});
-startHelper();
-
 const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.mp4': 'video/mp4' };
 async function sendFile(req, res, file, cache = 'no-store') {
   const stat = await fsp.stat(file);
@@ -407,7 +413,7 @@ async function handleRequest(req, res, shareOnly = false) {
       if (parts[1] === 'status' && method === 'GET') {
         return json(res, 200, { ...runtime, settings: library.settings, clipCount: library.clips.length,
           bufferSeconds, bufferAvailableSeconds: runtime.ready && segments.length ? Math.min(bufferSeconds, Math.floor(Date.now() / 1000 - segments[0].start)) : 0,
-          platform: process.platform,
+          platform: process.platform, desktopOwnerPid: Number(process.env.CMS_DESKTOP_OWNER_PID || 0),
           storageBytes: library.clips.reduce((sum, clip) => sum + clip.bytes, 0), dataDir, localUrl: `http://localhost:${port}`, shareBaseUrl: baseUrl(),
           tunnelAvailable: Boolean(executable('cloudflared')), hotkeys: process.platform === 'win32'
             ? ['Ctrl Alt 1', 'Ctrl Alt 2', 'Ctrl Alt 3', 'Ctrl Shift 8', 'Ctrl Shift 9', 'Ctrl Shift 7']
@@ -513,8 +519,14 @@ async function handleRequest(req, res, shareOnly = false) {
 }
 const server = http.createServer((req, res) => handleRequest(req, res));
 const shareServer = http.createServer((req, res) => handleRequest(req, res, true));
-server.on('error', error => { console.error(`Cannot start the local server: ${error.message}`); process.exitCode = 1; });
-server.listen(port, process.env.CMS_HOST || '0.0.0.0', () => console.log(`Clip My Screen: http://localhost:${port}`));
-shareServer.on('error', error => { console.error(`Cannot start the share server: ${error.message}`); process.exitCode = 1; });
+server.on('error', error => { console.error(`Cannot start the local server: ${error.message}`); process.exit(1); });
+server.listen(port, process.env.CMS_HOST || '0.0.0.0', async () => {
+  console.log(`Clip My Screen: http://localhost:${port}`);
+  for (const file of await fsp.readdir(bufferDir)) {
+    if (file.startsWith('segment-') || file.startsWith('concat-')) await fsp.rm(path.join(bufferDir, file), { force: true }).catch(() => {});
+  }
+  startHelper();
+});
+shareServer.on('error', error => { console.error(`Cannot start the share server: ${error.message}`); process.exit(1); });
 shareServer.listen(sharePort, '127.0.0.1');
-process.on('SIGTERM', () => { stopTunnel(); if (helper) sendHelper({ action: 'quit' }); shareServer.close(); server.close(() => process.exit(0)); });
+process.on('SIGTERM', () => { shuttingDown = true; stopTunnel(); if (helper) sendHelper({ action: 'quit' }); shareServer.close(); server.close(() => process.exit(0)); });

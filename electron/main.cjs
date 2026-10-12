@@ -1,5 +1,5 @@
 const { app, BrowserWindow, dialog, globalShortcut, Menu, nativeImage, screen, Tray } = require('electron');
-const { spawn } = require('node:child_process');
+const { execFileSync, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -7,15 +7,31 @@ const dashboard = 'http://localhost:3917/';
 const statusUrl = 'http://127.0.0.1:3917/api/status';
 let mainWindow;
 let tray;
+let trayTimer;
+let lastTrayState;
 let service;
+let serviceFailures = 0;
 let quitting = false;
 
-async function serviceReady() {
+async function serviceStatus() {
   try {
     const response = await fetch(statusUrl, { signal: AbortSignal.timeout(1500) });
-    const status = await response.json();
-    return response.ok && typeof status.bufferSeconds === 'number';
-  } catch { return false; }
+    return response.ok ? await response.json() : null;
+  } catch { return null; }
+}
+
+async function serviceReady() {
+  const status = await serviceStatus();
+  return status?.desktopOwnerPid === process.pid;
+}
+
+function removeLegacyLoginService() {
+  if (process.platform !== 'darwin') return;
+  const plist = path.join(app.getPath('home'), 'Library', 'LaunchAgents', 'dev.jakedoes.clipmyscreen.plist');
+  if (!fs.existsSync(plist) || !fs.readFileSync(plist, 'utf8').includes('/server.mjs')) return;
+  try { execFileSync('launchctl', ['bootout', `gui/${process.getuid()}/dev.jakedoes.clipmyscreen`], { stdio: 'ignore' }); }
+  catch { /* The service may already be stopped. */ }
+  fs.rmSync(plist, { force: true });
 }
 
 function displays() {
@@ -35,10 +51,12 @@ function displays() {
 }
 
 function startService() {
+  const startedAt = Date.now();
   const project = app.getAppPath();
+  const developmentFfmpeg = path.join(project, 'vendor', process.platform === 'win32' ? 'ffmpeg.exe' : 'bin/ffmpeg');
   const ffmpeg = app.isPackaged
     ? path.join(process.resourcesPath, 'ffmpeg', process.platform === 'win32' ? 'ffmpeg.exe' : 'bin/ffmpeg')
-    : process.env.CMS_FFMPEG || path.join(project, 'vendor', process.platform === 'win32' ? 'ffmpeg.exe' : 'bin/ffmpeg');
+    : process.env.CMS_FFMPEG || (fs.existsSync(developmentFfmpeg) ? developmentFfmpeg : 'ffmpeg');
   const nativeHelper = app.isPackaged
     ? path.join(process.resourcesPath, 'Clip My Screen Capture.app', 'Contents', 'MacOS', 'clip-capture')
     : path.join(project, 'build', 'Clip My Screen Capture.app', 'Contents', 'MacOS', 'clip-capture');
@@ -48,6 +66,7 @@ function startService() {
     CMS_DATA_DIR: path.join(app.getPath('videos'), 'Clip My Screen'),
     CMS_FFMPEG: ffmpeg,
     CMS_NATIVE_HELPER: nativeHelper,
+    CMS_DESKTOP_OWNER_PID: String(process.pid),
     CMS_DISPLAYS: JSON.stringify(displays())
   };
   const logPath = path.join(app.getPath('userData'), 'service.log');
@@ -60,7 +79,11 @@ function startService() {
   service.on('error', error => log(`${error.stack || error}\n`));
   service.on('close', () => {
     service = null;
-    if (!quitting) setTimeout(async () => { if (!(await serviceReady())) startService(); }, 3000);
+    if (quitting) return;
+    if (Date.now() - startedAt > 60_000) serviceFailures = 0;
+    serviceFailures += 1;
+    const delay = Math.min(180_000, 3000 * 2 ** Math.min(serviceFailures - 1, 6));
+    setTimeout(async () => { if (!quitting && !(await serviceReady())) startService(); }, delay);
   });
 }
 
@@ -76,11 +99,17 @@ async function post(route, payload = {}) {
   } catch (error) { dialog.showErrorBox('Capture unavailable', error.message); }
 }
 
-function createTray() {
-  const icon = nativeImage.createFromPath(path.join(app.getAppPath(), 'assets', 'tray.png'));
-  tray = new Tray(process.platform === 'darwin' ? icon.resize({ width: 18, height: 18 }) : icon);
-  tray.setToolTip('Clip My Screen is recording in the background');
+async function refreshTrayMenu() {
+  const status = await serviceStatus();
+  if (!tray || quitting) return;
+  const state = status?.ready ? `Capturing display ${status.settings.display + 1}`
+    : status?.error ? 'Capture needs attention' : 'Starting capture';
+  if (state === lastTrayState) return;
+  lastTrayState = state;
+  tray.setToolTip(`Clip My Screen · ${state}`);
   tray.setContextMenu(Menu.buildFromTemplate([
+    { label: state, enabled: false },
+    { type: 'separator' },
     { label: 'Open Clip My Screen', click: showWindow },
     { type: 'separator' },
     { label: 'Clip last 1 minute', click: () => post('grab', { seconds: 60 }) },
@@ -89,7 +118,15 @@ function createTray() {
     { type: 'separator' },
     { label: 'Quit Clip My Screen', click: () => app.quit() }
   ]));
+}
+
+function createTray() {
+  const icon = nativeImage.createFromPath(path.join(app.getAppPath(), 'assets', 'tray.png'));
+  tray = new Tray(process.platform === 'darwin' ? icon.resize({ width: 18, height: 18 }) : icon);
+  if (process.platform === 'darwin') tray.setTitle('Clip');
   if (process.platform === 'win32') tray.on('double-click', showWindow);
+  refreshTrayMenu();
+  trayTimer = setInterval(refreshTrayMenu, 10_000);
 }
 
 function registerWindowsShortcuts() {
@@ -125,11 +162,18 @@ function createWindow() {
     });
   });
   mainWindow.loadURL(dashboard);
-  mainWindow.on('close', event => { if (!quitting) { event.preventDefault(); mainWindow.hide(); } });
+  mainWindow.on('close', event => {
+    if (!quitting) {
+      event.preventDefault();
+      mainWindow.hide();
+      if (process.platform === 'darwin') app.dock.hide();
+    }
+  });
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
 function showWindow() {
+  if (process.platform === 'darwin') app.dock.show();
   if (!mainWindow) createWindow();
   else { mainWindow.show(); mainWindow.focus(); }
 }
@@ -138,20 +182,32 @@ if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', showWindow);
   app.whenReady().then(async () => {
+    removeLegacyLoginService();
     if (app.isPackaged) app.setLoginItemSettings({
       openAtLogin: true,
       ...(process.platform === 'win32' ? { path: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath } : {})
     });
-    if (!(await serviceReady())) startService();
+    const existing = await serviceStatus();
+    if (existing && existing.desktopOwnerPid !== process.pid) {
+      dialog.showErrorBox('Another recorder is running', 'A recorder outside this desktop app is using port 3917. Stop that recorder, then reopen Clip My Screen.');
+      app.quit();
+      return;
+    }
+    if (!existing) startService();
     for (let attempt = 0; attempt < 60 && !(await serviceReady()); attempt++) await new Promise(resolve => setTimeout(resolve, 500));
+    if (!(await serviceReady())) {
+      dialog.showErrorBox('Capture service unavailable', 'The recorder did not start. Reopen Clip My Screen to try again.');
+      app.quit();
+      return;
+    }
     if (process.platform === 'win32') registerWindowsShortcuts();
     createTray();
-    if (process.platform === 'darwin') app.dock.hide();
     createWindow();
     app.on('activate', showWindow);
   });
   app.on('before-quit', () => {
     quitting = true;
+    clearInterval(trayTimer);
     if (service) {
       if (process.platform === 'win32') spawn('taskkill', ['/T', '/F', '/PID', String(service.pid)], { windowsHide: true });
       else service.kill('SIGTERM');

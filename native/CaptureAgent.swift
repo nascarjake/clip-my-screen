@@ -152,6 +152,9 @@ final class CaptureAgent: NSObject, SCRecordingOutputDelegate, SCStreamDelegate 
         do {
             try stream.removeRecordingOutput(output)
             self.output = nil
+            // Start the next segment immediately so rotation does not leave
+            // capture idle while the previous MP4 finishes writing.
+            addOutput()
             // ScreenCaptureKit sometimes finalizes the file without sending the
             // optional finish delegate callback. Give the MP4 time to close,
             // then advance even if that callback never arrives.
