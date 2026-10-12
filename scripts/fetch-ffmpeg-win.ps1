@@ -7,6 +7,7 @@ $expected = '17eaa8c3f7f39b20224c4e09276272f36f6b3829f5c728ee084e391d159eeb55'
 $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($actual -ne $expected) { throw 'FFmpeg checksum mismatch' }
 Expand-Archive $archive -DestinationPath vendor/ffmpeg -Force
+$ErrorActionPreference = 'Continue'
 $build = (& vendor/ffmpeg/ffmpeg.exe -buildconf 2>&1 | Out-String)
 if ($build -notmatch '--disable-nonfree' -or $build -notmatch '--enable-gpl') { throw 'FFmpeg build is not redistributable' }
 $encoders = (& vendor/ffmpeg/ffmpeg.exe -encoders 2>&1 | Out-String)
