@@ -58,8 +58,8 @@ let restartRequested = false;
 let tunnelProcess;
 
 function executable(name) {
-  for (const folder of [path.join(root, 'bin'), ...(process.env.PATH || '').split(':')]) {
-    const candidate = path.join(folder, name);
+  for (const folder of [path.join(root, 'bin'), ...(process.env.PATH || '').split(path.delimiter)]) {
+    const candidate = path.join(folder, process.platform === 'win32' ? `${name}.exe` : name);
     try { fs.accessSync(candidate, fs.constants.X_OK); return candidate; } catch {}
   }
   return null;
