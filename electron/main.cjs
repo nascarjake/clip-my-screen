@@ -23,13 +23,13 @@ function displays() {
   return screen.getAllDisplays().map((display, index) => {
     const scale = display.scaleFactor || 1;
     const bounds = display.bounds;
+    const physical = process.platform === 'win32' ? screen.dipToScreenRect(null, bounds) : {
+      x: Math.round(bounds.x * scale), y: Math.round(bounds.y * scale),
+      width: Math.round(bounds.width * scale), height: Math.round(bounds.height * scale)
+    };
     return {
       index, id: display.id, main: display.id === primaryId,
-      width: Math.round(bounds.width * scale), height: Math.round(bounds.height * scale),
-      captureBounds: {
-        x: Math.round(bounds.x * scale), y: Math.round(bounds.y * scale),
-        width: Math.round(bounds.width * scale), height: Math.round(bounds.height * scale)
-      }
+      width: physical.width, height: physical.height, captureBounds: physical
     };
   });
 }
