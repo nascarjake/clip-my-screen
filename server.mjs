@@ -53,6 +53,7 @@ const pendingFlushes = new Map();
 const protectedPaths = new Set();
 let helper;
 let helperBuffer = '';
+let lastCaptureError = '';
 let captureQueue = Promise.resolve();
 let restartRequested = false;
 let helperFailures = 0;
@@ -123,6 +124,7 @@ function sendHelper(value) {
 function startHelper() {
   if (process.env.CMS_DISABLE_CAPTURE === '1') return;
   helperStartedAt = Date.now();
+  lastCaptureError = '';
   const nativeExecutable = process.env.CMS_NATIVE_HELPER || path.join(root, 'build', 'Clip My Screen Capture.app', 'Contents', 'MacOS', 'clip-capture');
   const windows = process.platform === 'win32';
   if (!windows && !fs.existsSync(nativeExecutable)) {
@@ -145,7 +147,7 @@ function startHelper() {
     }
   });
   helper.stderr.on('data', chunk => console.error('Capture helper:', chunk.toString().trim()));
-  helper.on('error', error => { runtime.ready = false; runtime.error = error.message; });
+  helper.on('error', error => { runtime.ready = false; runtime.error = error.message; lastCaptureError = error.message; });
   helper.on('close', async code => {
     runtime.ready = false;
     helper = null;
@@ -162,10 +164,14 @@ function startHelper() {
       helperFailures = 0;
       setTimeout(startHelper, 300).unref();
     } else if (code !== 0 && process.env.CMS_DISABLE_CAPTURE !== '1') {
+      if (/declined TCC|permission|not authorized|denied/i.test(lastCaptureError)) {
+        runtime.error = 'Screen Recording permission is denied for Clip My Screen Capture. Enable it in System Settings, then reopen the app.';
+        return;
+      }
       if (Date.now() - helperStartedAt > 60_000) helperFailures = 0;
       helperFailures += 1;
       const delay = Math.min(180_000, 3000 * 2 ** Math.min(helperFailures - 1, 6));
-      runtime.error = `Capture helper exited (${code}). Retrying in ${Math.round(delay / 1000)} seconds…`;
+      runtime.error = `${lastCaptureError || `Capture helper exited (${code})`}. Retrying in ${Math.round(delay / 1000)} seconds…`;
       setTimeout(startHelper, delay).unref();
     }
   });
@@ -215,6 +221,7 @@ function handleHelper(event) {
     Object.assign(runtime, { ready: true, error: '', width: event.width, height: event.height, displayCount: event.displayCount, displays: event.displays });
   } else if (event.event === 'error') {
     runtime.error = event.message;
+    lastCaptureError = event.message;
     if (event.message.startsWith('Screen capture stopped') || event.message.startsWith('Recording failed')) runtime.ready = false;
     console.error('Capture:', event.message);
   } else if (event.event === 'segment') {
