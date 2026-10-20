@@ -45,11 +45,19 @@ function toast(message, type='success') {
   const item = document.createElement('div'); item.className = `toast ${type}`; item.textContent = message;
   $('#toast-stack').append(item); setTimeout(() => item.remove(), 4200);
 }
+let refreshPending;
 async function refresh() {
+  if (refreshPending) return refreshPending;
+  refreshPending = refreshData();
+  try { await refreshPending; } finally { refreshPending = null; }
+}
+async function refreshData() {
   try {
     const [status, clips] = await Promise.all([api('/api/status'), api('/api/clips')]);
+    const clipsChanged = !state.status || JSON.stringify(clips) !== JSON.stringify(state.clips);
     state.status = status; state.clips = clips;
-    renderStatus(); renderClips();
+    renderStatus();
+    if (clipsChanged) renderClips();
   } catch (error) { toast(error.message, 'error'); }
 }
 function renderStatus() {
@@ -71,9 +79,12 @@ function renderStatus() {
   $('#capture-resolution').textContent = status.ready ? `${status.width} × ${status.height} · ${status.settings.fps} FPS` : `${status.settings.quality}p · ${status.settings.fps} FPS`;
   $('#audio-label').textContent = status.settings.systemAudio ? (status.settings.microphone ? 'System + mic' : 'System audio') : (status.settings.microphone ? 'Microphone' : 'No audio');
   $('#capture-dot').style.background = status.ready ? '#58d49c' : '#eb9d64';
-  $('#capture-label').textContent = status.recording ? 'LONG RECORDING IN PROGRESS' : status.ready ? 'ALWAYS READY TO CLIP' : 'RECORDER NEEDS ATTENTION';
-  $('#capture-headline').textContent = status.recording ? 'Your session is recording.' : status.ready ? 'Your screen, on standby.' : 'Capture is unavailable.';
-  $('#capture-description').textContent = status.error || (status.recording ? 'Press stop when you are done. You can still save instant clips along the way.' : 'The last few moments are kept in a private rolling buffer until you save them.');
+  $('#capture-label').textContent = status.paused ? 'CAPTURE PAUSED' : status.recording ? 'LONG RECORDING IN PROGRESS' : status.ready ? 'ALWAYS READY TO CLIP' : 'RECORDER NEEDS ATTENTION';
+  $('#capture-headline').textContent = status.paused ? 'Your screen is not being recorded.' : status.recording ? 'Your session is recording.' : status.ready ? 'Your screen, on standby.' : 'Capture is unavailable.';
+  $('#capture-description').textContent = status.paused ? 'Capture stays paused after reopening the app and at login. Choose Resume capture when you are ready to record.' : status.error || (status.recording ? 'Press stop when you are done. You can still save instant clips along the way.' : 'The last few moments are kept in a private rolling buffer until you save them.');
+  $('#capture-toggle').textContent = status.paused ? 'Resume capture' : 'Pause capture';
+  $('#capture-toggle').disabled = Boolean(status.recording);
+  $$('#side-clip, #side-shot, #side-record, #quick-clip, #quick-shot, #quick-record, #library-clip, #hero-record, [data-grab-seconds]').forEach(button => { button.disabled = !status.ready; });
   $('#record-button-text').textContent = status.recording ? 'Stop recording' : 'Start recording';
   $('#hero-record').classList.toggle('recording', !!status.recording);
   $('#hero-clip').disabled = !status.ready;
@@ -203,6 +214,12 @@ for (const selector of ['#settings-open','#top-settings']) $(selector).addEventL
   catch (error) { toast(error.message, 'error'); }
 });
 $('#settings-save').addEventListener('click',saveSettings);
+$('#capture-toggle').addEventListener('click', async () => {
+  try {
+    await api('/api/capture', { method: 'POST', body: JSON.stringify({ enabled: Boolean(state.status?.paused) }) });
+    await refresh();
+  } catch (error) { toast(error.message, 'error'); }
+});
 $('#tunnel-button').addEventListener('click',async()=>{
   try {
     if (state.status?.tunnelStatus === 'online') { await api('/api/tunnel/stop',{method:'POST',body:'{}'}); toast('Public share session stopped'); await refresh(); return; }
@@ -230,4 +247,5 @@ $('#detail-download').addEventListener('click',()=>{const a=document.createEleme
 $('#detail-delete').addEventListener('click',async()=>{if(!confirm('Delete this capture from your computer?'))return;try{await api(`/api/clips/${state.selected}`,{method:'DELETE'});modal('detail-modal',false);toast('Capture deleted');await refresh()}catch(error){toast(error.message,'error')}});
 $('#trim-submit').addEventListener('click',async()=>{try{const job=await api(`/api/clips/${state.selected}/trim`,{method:'POST',body:JSON.stringify({start:Number($('#trim-start').value),end:Number($('#trim-end').value)})});toast('Creating your trim…');await waitJob(job,'Trim saved as a new clip');modal('detail-modal',false)}catch(error){toast(error.message,'error')}});
 await refresh();
-setInterval(refresh,5000);
+setInterval(() => { if (!document.hidden) refresh(); },5000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });

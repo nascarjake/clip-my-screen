@@ -9,7 +9,9 @@ case "$arch" in
 esac
 archive="ffmpeg9.0.1-macos-${arch}.zip"
 mkdir -p vendor/ffmpeg
-curl -fL --retry 3 "https://github.com/ispysoftware/agentdvr-ffmpeg-build/releases/download/v9.0.1/$archive" -o "vendor/$archive"
+if [[ ! -f "vendor/$archive" ]]; then
+  curl -fL --retry 3 "https://github.com/ispysoftware/agentdvr-ffmpeg-build/releases/download/v9.0.1/$archive" -o "vendor/$archive"
+fi
 echo "$checksum  vendor/$archive" | shasum -a 256 -c -
 unzip -q -o "vendor/$archive" -d vendor/ffmpeg
 build="$(vendor/ffmpeg/bin/ffmpeg -buildconf 2>&1)"

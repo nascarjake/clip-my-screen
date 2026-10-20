@@ -43,6 +43,11 @@ final class CaptureAgent: NSObject, SCRecordingOutputDelegate, SCStreamDelegate 
     private var nextIndex = 0
     private var timer: Timer?
     private var hotkeys: [EventHotKeyRef?] = []
+    // A longer segment avoids repeatedly rebuilding the encoder during standby.
+    // Explicit clip requests still flush immediately.
+    private let segmentSeconds: TimeInterval = 30
+    private let queueDepth = 3
+    private var stopping = false
 
     init(directory: URL, displayIndex: Int, maxHeight: Int, fps: Int, systemAudio: Bool, microphone: Bool) {
         self.directory = directory
@@ -84,6 +89,12 @@ final class CaptureAgent: NSObject, SCRecordingOutputDelegate, SCStreamDelegate 
 
     func start() async {
         do {
+            guard CGPreflightScreenCaptureAccess() else {
+                throw NSError(domain: "ClipMyScreen", code: 3, userInfo: [NSLocalizedDescriptionKey: "Screen Recording permission is required for Clip My Screen Capture. Enable it in System Settings, then reopen the app."])
+            }
+            if microphone && AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
+                throw NSError(domain: "ClipMyScreen", code: 4, userInfo: [NSLocalizedDescriptionKey: "Microphone permission is required. Enable it in System Settings or turn microphone capture off."])
+            }
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
             guard !content.displays.isEmpty else { throw NSError(domain: "ClipMyScreen", code: 1, userInfo: [NSLocalizedDescriptionKey: "No display available"]) }
@@ -106,7 +117,7 @@ final class CaptureAgent: NSObject, SCRecordingOutputDelegate, SCStreamDelegate 
             config.width = width
             config.height = height
             config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
-            config.queueDepth = 6
+            config.queueDepth = queueDepth
             config.showsCursor = true
             config.capturesAudio = systemAudio
             config.captureMicrophone = microphone
@@ -114,10 +125,10 @@ final class CaptureAgent: NSObject, SCRecordingOutputDelegate, SCStreamDelegate 
             let filter = SCContentFilter(display: display, excludingWindows: [])
             let stream = SCStream(filter: filter, configuration: config, delegate: self)
             self.stream = stream
-            addOutput()
+            try addOutput()
             try await stream.startCapture()
-            emit(["event": "ready", "width": width, "height": height, "fps": fps, "displayCount": content.displays.count, "displayIndex": displayIndex, "displays": displayOptions])
-            let rotationTimer = Timer(timeInterval: 4, repeats: true) { [weak self] _ in self?.rotate() }
+            emit(["event": "ready", "width": width, "height": height, "fps": fps, "displayCount": content.displays.count, "displayIndex": displayIndex, "displays": displayOptions, "segmentSeconds": segmentSeconds, "queueDepth": queueDepth])
+            let rotationTimer = Timer(timeInterval: segmentSeconds, repeats: true) { [weak self] _ in self?.rotate() }
             RunLoop.main.add(rotationTimer, forMode: .common)
             timer = rotationTimer
         } catch {
@@ -126,7 +137,7 @@ final class CaptureAgent: NSObject, SCRecordingOutputDelegate, SCStreamDelegate 
         }
     }
 
-    private func addOutput() {
+    private func addOutput() throws {
         guard let stream else { return }
         let index = nextIndex
         nextIndex += 1
@@ -136,13 +147,9 @@ final class CaptureAgent: NSObject, SCRecordingOutputDelegate, SCStreamDelegate 
         configuration.videoCodecType = .h264
         configuration.outputFileType = .mp4
         let output = SCRecordingOutput(configuration: configuration, delegate: self)
-        do {
-            try stream.addRecordingOutput(output)
-            segments[ObjectIdentifier(output)] = Segment(index: index, path: path, start: Date())
-            self.output = output
-        } catch {
-            emit(["event": "error", "message": "Recorder failed: \(error.localizedDescription)"])
-        }
+        try stream.addRecordingOutput(output)
+        segments[ObjectIdentifier(output)] = Segment(index: index, path: path, start: Date())
+        self.output = output
     }
 
     func rotate(flushId: String? = nil) {
@@ -153,12 +160,16 @@ final class CaptureAgent: NSObject, SCRecordingOutputDelegate, SCStreamDelegate 
         do {
             try stream.removeRecordingOutput(output)
             self.output = nil
+            // The stream supports one recording output. Once removal succeeds,
+            // attach its replacement immediately; file finalization is separate.
+            try addOutput()
             // ScreenCaptureKit sometimes finalizes the file without sending the
             // optional finish delegate callback. Give the MP4 time to close,
             // then advance even if that callback never arrives.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.finishSegment(output) }
         } catch {
             emit(["event": "error", "message": "Recorder rotation failed: \(error.localizedDescription)"])
+            exit(2)
         }
     }
 
@@ -173,7 +184,6 @@ final class CaptureAgent: NSObject, SCRecordingOutputDelegate, SCStreamDelegate 
         for id in flushes.removeValue(forKey: segment.index) ?? [] {
             emit(["event": "flushed", "id": id, "index": segment.index])
         }
-        if output == nil { addOutput() }
     }
 
     func recordingOutput(_ recordingOutput: SCRecordingOutput, didFailWithError error: Error) {
@@ -198,6 +208,8 @@ final class CaptureAgent: NSObject, SCRecordingOutputDelegate, SCStreamDelegate 
               let action = command["action"] as? String else { return }
         if action == "flush" { rotate(flushId: command["id"] as? String) }
         if action == "quit" {
+            guard !stopping else { return }
+            stopping = true
             timer?.invalidate()
             Task { try? await stream?.stopCapture(); exit(0) }
         }
@@ -205,6 +217,11 @@ final class CaptureAgent: NSObject, SCRecordingOutputDelegate, SCStreamDelegate 
 }
 
 let arguments = CommandLine.arguments
+if arguments.contains("--preflight") {
+    let granted = CGPreflightScreenCaptureAccess()
+    print("{\"screenRecordingGranted\":\(granted),\"microphoneGranted\":\(AVCaptureDevice.authorizationStatus(for: .audio) == .authorized)}")
+    exit(granted ? 0 : 3)
+}
 guard let directoryArgument = arguments.firstIndex(of: "--dir"), directoryArgument + 1 < arguments.count else {
     fputs("Clip My Screen Capture is a background helper. Open Clip My Screen.app instead.\n", stderr)
     exit(64)
@@ -224,5 +241,7 @@ agent.registerHotkeys()
 Task { await agent.start() }
 DispatchQueue.global(qos: .utility).async {
     while let line = readLine() { DispatchQueue.main.async { agent.handle(line) } }
+    // The owning service went away. Never leave an orphan capture stream running.
+    DispatchQueue.main.async { agent.handle("{\"action\":\"quit\"}") }
 }
 RunLoop.main.run()

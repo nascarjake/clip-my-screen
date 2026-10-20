@@ -1,0 +1,27 @@
+name: Report a bug
+description: Help make capture and playback more reliable.
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: Include expected behavior and a small reproduction. Avoid private recordings or share links.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: App version, OS, and CPU architecture
+      placeholder: v0.2.0 · macOS 15 · Apple Silicon / Windows 11 · x64
+    validations:
+      required: true
+  - type: textarea
+    id: settings
+    attributes:
+      label: Capture setup
+      description: Display count/resolution/scaling, selected display, FPS, quality, audio, and whether capture was paused.
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Optional evidence
+      description: Sanitized errors, measurements, or screenshots using non-sensitive content.

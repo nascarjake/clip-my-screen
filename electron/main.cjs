@@ -3,8 +3,13 @@ const { execFileSync, spawn } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
 
-const dashboard = 'http://localhost:3917/';
-const statusUrl = 'http://127.0.0.1:3917/api/status';
+const servicePort = Number(process.env.CMS_PORT || 3917);
+const dashboard = `http://localhost:${servicePort}/`;
+const statusUrl = `http://127.0.0.1:${servicePort}/api/status`;
+if (process.env.CMS_APP_USER_DATA_DIR) {
+  fs.mkdirSync(process.env.CMS_APP_USER_DATA_DIR, { recursive: true });
+  app.setPath('userData', process.env.CMS_APP_USER_DATA_DIR);
+}
 let mainWindow;
 let tray;
 let trayTimer;
@@ -53,7 +58,8 @@ function displays() {
 function startService() {
   const startedAt = Date.now();
   const project = app.getAppPath();
-  const developmentFfmpeg = path.join(project, 'vendor', process.platform === 'win32' ? 'ffmpeg.exe' : 'bin/ffmpeg');
+  const loginItem = app.isPackaged && !process.argv.includes('--no-login') ? app.getLoginItemSettings() : null;
+  const developmentFfmpeg = path.join(project, 'vendor', 'ffmpeg', process.platform === 'win32' ? 'ffmpeg.exe' : 'bin/ffmpeg');
   const ffmpeg = app.isPackaged
     ? path.join(process.resourcesPath, 'ffmpeg', process.platform === 'win32' ? 'ffmpeg.exe' : 'bin/ffmpeg')
     : process.env.CMS_FFMPEG || (fs.existsSync(developmentFfmpeg) ? developmentFfmpeg : 'ffmpeg');
@@ -63,10 +69,12 @@ function startService() {
   const env = {
     ...process.env,
     ELECTRON_RUN_AS_NODE: '1',
-    CMS_DATA_DIR: path.join(app.getPath('videos'), 'Clip My Screen'),
+    CMS_DATA_DIR: process.env.CMS_DATA_DIR || path.join(app.getPath('videos'), 'Clip My Screen'),
     CMS_FFMPEG: ffmpeg,
     CMS_NATIVE_HELPER: nativeHelper,
     CMS_DESKTOP_OWNER_PID: String(process.pid),
+    CMS_LOGIN_ITEM_SETTINGS: JSON.stringify(loginItem ? { openAtLogin: loginItem.openAtLogin, status: loginItem.status } : null),
+    ...(process.argv.includes('--paused') ? { CMS_START_PAUSED: '1' } : {}),
     CMS_DISPLAYS: JSON.stringify(displays())
   };
   const logPath = path.join(app.getPath('userData'), 'service.log');
@@ -89,7 +97,7 @@ function startService() {
 
 async function post(route, payload = {}) {
   try {
-    const response = await fetch(`http://127.0.0.1:3917/api/${route}`, {
+    const response = await fetch(`http://127.0.0.1:${servicePort}/api/${route}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
     });
     if (!response.ok) {
@@ -102,7 +110,7 @@ async function post(route, payload = {}) {
 async function refreshTrayMenu() {
   const status = await serviceStatus();
   if (!tray || quitting) return;
-  const state = status?.ready ? `Capturing display ${status.settings.display + 1}`
+  const state = status?.paused ? 'Capture paused' : status?.ready ? `Capturing display ${status.settings.display + 1}`
     : status?.error ? 'Capture needs attention' : 'Starting capture';
   if (state === lastTrayState) return;
   lastTrayState = state;
@@ -111,10 +119,11 @@ async function refreshTrayMenu() {
     { label: state, enabled: false },
     { type: 'separator' },
     { label: 'Open Clip My Screen', click: showWindow },
+    { label: status?.paused ? 'Resume capture' : 'Pause capture', click: async () => { await post('capture', { enabled: Boolean(status?.paused) }); await refreshTrayMenu(); } },
     { type: 'separator' },
-    { label: 'Clip last 1 minute', click: () => post('grab', { seconds: 60 }) },
-    { label: 'Clip last 5 minutes', click: () => post('grab', { seconds: 300 }) },
-    { label: 'Clip last 15 minutes', click: () => post('grab', { seconds: 900 }) },
+    { label: 'Clip last 1 minute', enabled: Boolean(status?.ready), click: () => post('grab', { seconds: 60 }) },
+    { label: 'Clip last 5 minutes', enabled: Boolean(status?.ready), click: () => post('grab', { seconds: 300 }) },
+    { label: 'Clip last 15 minutes', enabled: Boolean(status?.ready), click: () => post('grab', { seconds: 900 }) },
     { type: 'separator' },
     { label: 'Quit Clip My Screen', click: () => app.quit() }
   ]));
@@ -183,7 +192,7 @@ else {
   app.on('second-instance', showWindow);
   app.whenReady().then(async () => {
     removeLegacyLoginService();
-    if (app.isPackaged) app.setLoginItemSettings({
+    if (app.isPackaged && !process.argv.includes('--no-login')) app.setLoginItemSettings({
       openAtLogin: true,
       ...(process.platform === 'win32' ? { path: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath } : {})
     });
@@ -202,7 +211,9 @@ else {
     }
     if (process.platform === 'win32') registerWindowsShortcuts();
     createTray();
-    createWindow();
+    const loginLaunch = process.platform === 'darwin' && (app.getLoginItemSettings().wasOpenedAtLogin || process.argv.includes('--hidden'));
+    if (loginLaunch) app.dock.hide();
+    else createWindow();
     app.on('activate', showWindow);
   });
   app.on('before-quit', () => {

@@ -1,6 +1,6 @@
 {
   "name": "clip-my-screen",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "Local, always-ready screen clips for macOS and Windows",
   "author": "Jacob Clark",
   "repository": "https://github.com/nascarjake/clip-my-screen",
@@ -13,13 +13,19 @@
     "start": "node server.mjs",
     "test": "node --test",
     "package:mac": "bash scripts/package-mac.sh",
-    "package:win": "pwsh -NoProfile -File scripts/fetch-ffmpeg-win.ps1 && electron-builder --config electron-builder.config.cjs --win portable"
+    "package:win": "pwsh -NoProfile -File scripts/fetch-ffmpeg-win.ps1 && electron-builder --config electron-builder.config.cjs --win nsis portable --x64",
+    "validate:paused": "node scripts/validate-paused-app.mjs",
+    "docs:screenshots": "electron scripts/screenshots.cjs"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "devDependencies": {
     "electron": "^39.8.2",
     "electron-builder": "^26.0.12"
+  },
+  "homepage": "https://jakedoesdev.com/lab/#clip-my-screen",
+  "bugs": {
+    "url": "https://github.com/nascarjake/clip-my-screen/issues"
   }
 }

@@ -6,11 +6,12 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { canPruneSegment } from './capture-policy.mjs';
+import { encodeVideo } from './video-encoding.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = process.env.CMS_DATA_DIR || path.join(os.homedir(), process.platform === 'win32' ? 'Videos' : 'Movies', 'Clip My Screen');
 const ffmpegPath = process.env.CMS_FFMPEG || 'ffmpeg';
-const h264Encode = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23'];
 const clipDir = path.join(dataDir, 'Clips');
 const bufferDir = path.join(dataDir, '.buffer');
 const publicDir = path.join(root, 'public');
@@ -18,7 +19,7 @@ const libraryPath = path.join(dataDir, 'library.json');
 const port = Number(process.env.CMS_PORT || 3917);
 const sharePort = port + 1;
 const defaults = {
-  clipSeconds: 60, quality: 1080, fps: 30, display: 0,
+  captureEnabled: false, clipSeconds: 60, quality: 1080, fps: 30, display: 0,
   systemAudio: process.platform !== 'win32', microphone: false, lanSharing: true,
   publicBaseUrl: ''
 };
@@ -28,6 +29,7 @@ let library;
 try { library = JSON.parse(await fsp.readFile(libraryPath, 'utf8')); }
 catch { library = { settings: { ...defaults }, clips: [] }; }
 library.settings = { ...defaults, ...library.settings };
+if (process.env.CMS_START_PAUSED === '1') library.settings.captureEnabled = false;
 if (process.platform === 'win32') {
   library.settings.systemAudio = false;
   library.settings.microphone = false;
@@ -45,13 +47,17 @@ function save() {
 }
 await save();
 
-const runtime = { ready: false, error: '', width: 0, height: 0, displayCount: 0, displays: [], startedAt: Date.now(), recording: null, tunnelUrl: null, tunnelStatus: 'off', tunnelError: '' };
+const desktopDisplays = JSON.parse(process.env.CMS_DISPLAYS || '[]');
+const runtime = { ready: false, error: '', width: 0, height: 0, displayCount: desktopDisplays.length, displays: desktopDisplays, startedAt: Date.now(), recording: null, tunnelUrl: null, tunnelStatus: 'off', tunnelError: '' };
 const bufferSeconds = 900;
 const jobs = new Map();
 const segments = [];
 const pendingFlushes = new Map();
 const protectedPaths = new Set();
+const children = new Set();
 let helper;
+let helperCleanup = Promise.resolve();
+let captureControl = Promise.resolve();
 let helperBuffer = '';
 let lastCaptureError = '';
 let captureQueue = Promise.resolve();
@@ -106,15 +112,23 @@ async function body(req) {
 }
 function run(command, args, timeout = 180000) {
   return new Promise((resolve, reject) => {
+    if (shuttingDown) return reject(Object.assign(new Error('Recorder is shutting down'), { code: 'CMS_SHUTDOWN' }));
     const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+    children.add(child);
     let errors = '';
     child.stderr.on('data', chunk => { errors += chunk; errors = errors.slice(-8000); });
     const timer = setTimeout(() => child.kill('SIGTERM'), timeout);
     child.on('error', error => { clearTimeout(timer); reject(error); });
     child.on('close', code => {
+      children.delete(child);
       clearTimeout(timer);
       code === 0 ? resolve() : reject(new Error(errors.trim() || `${command} exited ${code}`));
     });
+  });
+}
+async function encode(input, output, timeout) {
+  runtime.exportEncoder = await encodeVideo(run, ffmpegPath, input, output, {
+    platform: process.platform, height: library.settings.quality, fps: library.settings.fps, timeout
   });
 }
 function sendHelper(value) {
@@ -122,18 +136,21 @@ function sendHelper(value) {
   helper.stdin.write(JSON.stringify(value) + '\n');
 }
 function startHelper() {
-  if (process.env.CMS_DISABLE_CAPTURE === '1') return;
+  if (shuttingDown || helper || !library.settings.captureEnabled || process.env.CMS_DISABLE_CAPTURE === '1') return;
   helperStartedAt = Date.now();
   lastCaptureError = '';
   const nativeExecutable = process.env.CMS_NATIVE_HELPER || path.join(root, 'build', 'Clip My Screen Capture.app', 'Contents', 'MacOS', 'clip-capture');
+  const moduleHelper = Boolean(process.env.CMS_NATIVE_HELPER && /\.(cjs|mjs)$/.test(nativeExecutable));
   const windows = process.platform === 'win32';
-  if (!windows && !fs.existsSync(nativeExecutable)) {
+  if ((!windows || moduleHelper) && !fs.existsSync(nativeExecutable)) {
     runtime.error = 'Native capture helper is missing. Run npm run build:native.';
     return;
   }
   const settings = library.settings;
   const args = ['--dir', bufferDir, '--display', String(settings.display), '--height', String(settings.quality), '--fps', String(settings.fps), '--audio', String(settings.systemAudio), '--mic', String(settings.microphone)];
-  helper = windows
+  helper = moduleHelper
+    ? spawn(process.execPath, [nativeExecutable, ...args], { stdio: ['pipe', 'pipe', 'pipe'], env: process.env, windowsHide: true })
+    : windows
     ? spawn(process.execPath, [path.join(root, 'windows', 'capture-agent.mjs'), ...args], { stdio: ['pipe', 'pipe', 'pipe'], env: process.env })
     : spawn(nativeExecutable, args, { stdio: ['pipe', 'pipe', 'pipe'] });
   helperBuffer = '';
@@ -148,7 +165,7 @@ function startHelper() {
   });
   helper.stderr.on('data', chunk => console.error('Capture helper:', chunk.toString().trim()));
   helper.on('error', error => { runtime.ready = false; runtime.error = error.message; lastCaptureError = error.message; });
-  helper.on('close', async code => {
+  helper.on('close', code => { helperCleanup = (async () => {
     runtime.ready = false;
     helper = null;
     for (const [key, pending] of pendingFlushes) { pending.reject(new Error('Capture helper stopped')); pendingFlushes.delete(key); }
@@ -158,7 +175,7 @@ function startHelper() {
     for (const file of await fsp.readdir(bufferDir).catch(() => [])) {
       if (file.startsWith('segment-')) await fsp.rm(path.join(bufferDir, file), { force: true }).catch(() => {});
     }
-    if (shuttingDown) return;
+    if (shuttingDown || !library.settings.captureEnabled) return;
     if (restartRequested) {
       restartRequested = false;
       helperFailures = 0;
@@ -174,7 +191,30 @@ function startHelper() {
       runtime.error = `${lastCaptureError || `Capture helper exited (${code})`}. Retrying in ${Math.round(delay / 1000)} seconds…`;
       setTimeout(startHelper, delay).unref();
     }
+  })(); });
+}
+async function stopHelper() {
+  const capture = helper;
+  if (capture) await new Promise(resolve => {
+    capture.once('close', resolve);
+    try { sendHelper({ action: 'quit' }); } catch { capture.kill('SIGTERM'); }
+    const timeout = setTimeout(() => capture.kill('SIGKILL'), 5000);
+    capture.once('close', () => clearTimeout(timeout));
   });
+  await helperCleanup;
+}
+async function setCaptureEnabled(enabled) {
+  if (runtime.recording) throw new Error('Stop the long recording before pausing capture');
+  library.settings.captureEnabled = enabled;
+  await save();
+  runtime.error = '';
+  if (enabled) startHelper();
+  else {
+    runtime.ready = false;
+    restartRequested = false;
+    await stopHelper();
+    runtime.captureDiagnostics = null;
+  }
 }
 function startTunnel() {
   if (tunnelProcess) return;
@@ -218,7 +258,8 @@ function handleHelper(event) {
     runtime.displays = event.displays;
     runtime.displayCount = event.displays.length;
   } else if (event.event === 'ready') {
-    Object.assign(runtime, { ready: true, error: '', width: event.width, height: event.height, displayCount: event.displayCount, displays: event.displays });
+    Object.assign(runtime, { ready: true, error: '', width: event.width, height: event.height, displayCount: event.displayCount, displays: event.displays,
+      captureDiagnostics: { helperPid: helper?.pid, segmentSeconds: event.segmentSeconds, queueDepth: event.queueDepth } });
   } else if (event.event === 'error') {
     runtime.error = event.message;
     lastCaptureError = event.message;
@@ -281,8 +322,8 @@ async function createFromSegments(type, start, end, maxSeconds, copyOnly = false
     const args = ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'concat', '-safe', '0', '-i', list];
     if (offset > 0.05) args.push('-ss', offset.toFixed(3));
     if (maxSeconds) args.push('-t', String(maxSeconds));
-    args.push(...(copyOnly ? ['-c', 'copy'] : [...h264Encode, '-c:a', 'aac']), '-movflags', '+faststart', output);
-    await run(ffmpegPath, args, copyOnly ? 300000 : 1200000);
+    if (copyOnly) await run(ffmpegPath, [...args, '-c', 'copy', '-movflags', '+faststart', output], 300000);
+    else await encode(args, ['-c:a', 'aac', '-movflags', '+faststart', output], 1200000);
     const stat = await fsp.stat(output);
     if (stat.size < 1000) throw new Error('The recorded clip was empty');
     const thumb = `${clipId}.jpg`;
@@ -310,6 +351,7 @@ function queueClip(seconds) {
   return job;
 }
 function takeScreenshot() {
+  if (!library.settings.captureEnabled || !runtime.ready) throw new Error('Capture is paused or unavailable. Resume capture first.');
   const job = makeJob('screenshot');
   enqueue(job, async () => {
     const clipId = id();
@@ -355,8 +397,8 @@ function toggleRecording() {
 }
 
 async function pruneBuffer() {
-  const cutoff = Date.now() / 1000 - bufferSeconds - 20;
-  while (segments.length && segments[0].end < cutoff && !runtime.recording && !protectedPaths.has(segments[0].path)) {
+  const policy = { now: Date.now() / 1000, bufferSeconds, recording: runtime.recording, protectedPaths };
+  while (segments.length && canPruneSegment(segments[0], policy)) {
     const segment = segments.shift();
     await fsp.rm(segment.path, { force: true }).catch(() => {});
   }
@@ -418,13 +460,23 @@ async function handleRequest(req, res, shareOnly = false) {
     if (method !== 'GET' && req.headers.origin && !/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(req.headers.origin)) return json(res, 403, { error: 'Invalid origin' });
     if (parts[0] === 'api') {
       if (parts[1] === 'status' && method === 'GET') {
-        return json(res, 200, { ...runtime, settings: library.settings, clipCount: library.clips.length,
+        return json(res, 200, { ...runtime, paused: !library.settings.captureEnabled, settings: library.settings, clipCount: library.clips.length,
           bufferSeconds, bufferAvailableSeconds: runtime.ready && segments.length ? Math.min(bufferSeconds, Math.floor(Date.now() / 1000 - segments[0].start)) : 0,
-          platform: process.platform, desktopOwnerPid: Number(process.env.CMS_DESKTOP_OWNER_PID || 0),
+          platform: process.platform, servicePid: process.pid, desktopOwnerPid: Number(process.env.CMS_DESKTOP_OWNER_PID || 0),
+          loginItemAtStartup: JSON.parse(process.env.CMS_LOGIN_ITEM_SETTINGS || 'null'),
           storageBytes: library.clips.reduce((sum, clip) => sum + clip.bytes, 0), dataDir, localUrl: `http://localhost:${port}`, shareBaseUrl: baseUrl(),
           tunnelAvailable: Boolean(executable('cloudflared')), hotkeys: process.platform === 'win32'
             ? ['Ctrl Alt 1', 'Ctrl Alt 2', 'Ctrl Alt 3', 'Ctrl Shift 8', 'Ctrl Shift 9', 'Ctrl Shift 7']
             : ['⌘ ⌥ 1', '⌘ ⌥ 2', '⌘ ⌥ 3', '⌘ ⇧ 8', '⌘ ⇧ 9', '⌘ ⇧ 7'] });
+      }
+      if (parts[1] === 'capture' && method === 'POST') {
+        const input = await body(req);
+        if (typeof input.enabled !== 'boolean') return json(res, 400, { error: 'Capture enabled must be true or false' });
+        if (shuttingDown) return json(res, 503, { error: 'Recorder is shutting down' });
+        if (runtime.recording) return json(res, 409, { error: 'Stop the long recording before pausing capture' });
+        captureControl = captureControl.catch(() => {}).then(() => setCaptureEnabled(input.enabled));
+        await captureControl;
+        return json(res, 200, { paused: !library.settings.captureEnabled, ready: runtime.ready });
       }
       if (parts[1] === 'tunnel' && parts[2] === 'start' && method === 'POST') { startTunnel(); return json(res, 202, { status: runtime.tunnelStatus }); }
       if (parts[1] === 'tunnel' && parts[2] === 'stop' && method === 'POST') { stopTunnel(); return json(res, 200, { status: runtime.tunnelStatus }); }
@@ -442,7 +494,10 @@ async function handleRequest(req, res, shareOnly = false) {
         if (!runtime.ready) return json(res, 503, { error: runtime.error || 'Recorder is still starting' });
         return json(res, 202, queueClip(seconds));
       }
-      if (parts[1] === 'screenshot' && method === 'POST') return json(res, 202, takeScreenshot());
+      if (parts[1] === 'screenshot' && method === 'POST') {
+        if (!library.settings.captureEnabled || !runtime.ready) return json(res, 503, { error: 'Capture is paused or unavailable. Resume capture first.' });
+        return json(res, 202, takeScreenshot());
+      }
       if (parts[1] === 'recording' && method === 'POST') {
         if (!runtime.ready) return json(res, 503, { error: runtime.error || 'Recorder is still starting' });
         return json(res, 202, toggleRecording());
@@ -489,7 +544,7 @@ async function handleRequest(req, res, shareOnly = false) {
             const newId = id();
             const filename = `${newId}.mp4`;
             const output = path.join(clipDir, filename);
-            await run(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-ss', String(start), '-i', fileFor(clip), '-t', String(end - start), ...h264Encode, '-c:a', 'aac', '-movflags', '+faststart', output], 600000);
+            await encode(['-hide_banner', '-loglevel', 'error', '-y', '-ss', String(start), '-i', fileFor(clip), '-t', String(end - start)], ['-c:a', 'aac', '-movflags', '+faststart', output], 600000);
             const stat = await fsp.stat(output);
             const thumb = `${newId}.jpg`;
             await run(ffmpegPath, ['-hide_banner', '-loglevel', 'error', '-y', '-ss', '0.5', '-i', output, '-frames:v', '1', '-vf', 'scale=480:-2', path.join(clipDir, thumb)]).catch(() => {});
@@ -536,4 +591,13 @@ server.listen(port, process.env.CMS_HOST || '0.0.0.0', async () => {
 });
 shareServer.on('error', error => { console.error(`Cannot start the share server: ${error.message}`); process.exit(1); });
 shareServer.listen(sharePort, '127.0.0.1');
-process.on('SIGTERM', () => { shuttingDown = true; stopTunnel(); if (helper) sendHelper({ action: 'quit' }); shareServer.close(); server.close(() => process.exit(0)); });
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  stopTunnel();
+  for (const child of children) child.kill('SIGTERM');
+  await Promise.all([stopHelper(), new Promise(resolve => shareServer.close(resolve)), new Promise(resolve => server.close(resolve))]);
+  process.exit(0);
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);
