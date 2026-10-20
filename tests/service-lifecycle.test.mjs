@@ -23,7 +23,10 @@ async function freePair() {
   }
   throw new Error('No test ports available');
 }
-test('shutdown waits for the one capture helper and exposes capture diagnostics', { timeout: 15000 }, async t => {
+test('POSIX termination waits for the one capture helper and exposes capture diagnostics', {
+  timeout: 15000,
+  skip: process.platform === 'win32' ? 'Windows SIGTERM forcibly terminates a process; explicit pause cleanup is tested below' : false
+}, async t => {
   const data = await fs.mkdtemp(path.join(os.tmpdir(), 'cms-lifecycle-'));
   await fs.writeFile(path.join(data, 'library.json'), JSON.stringify({ settings: { captureEnabled: true }, clips: [] }));
   const port = await freePair();

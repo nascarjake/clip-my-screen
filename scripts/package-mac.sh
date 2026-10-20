@@ -9,7 +9,7 @@ case "$arch" in
 esac
 npm run build:native
 bash scripts/fetch-ffmpeg-mac.sh
-./node_modules/.bin/electron-builder --config electron-builder.config.cjs --mac dmg --"$builder_arch"
+./node_modules/.bin/electron-builder --config electron-builder.config.cjs --mac dmg --"$builder_arch" --publish never
 app_dir="dist/mac"
 if [[ "$arch" == arm64 ]]; then app_dir="dist/mac-arm64"; fi
 codesign --verify --deep --strict "$app_dir/Clip My Screen.app"
